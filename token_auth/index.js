@@ -34,6 +34,26 @@ async function refreshAuth0Token(refreshToken) {
   return response.json();
 }
 
+async function getManagementApiToken() {
+  const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: AUTH0_CLIENT_ID,
+      client_secret: AUTH0_CLIENT_SECRET,
+      audience: `https://${AUTH0_DOMAIN}/api/v2/`,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to obtain Management API token');
+  }
+
+  const data = await response.json();
+  return data.access_token;
+}
+
 app.use(async (req, res, next) => {
   let token = req.get(SESSION_KEY);
   const refreshToken = req.get(REFRESH_HEADER_KEY);
@@ -119,6 +139,43 @@ app.post('/api/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     return res.status(500).send();
+  }
+});
+
+app.post('/api/register', async (req, res) => {
+  const { login, password } = req.body;
+
+  try {
+    const managementToken = await getManagementApiToken();
+
+    const response = await fetch(`https://${AUTH0_DOMAIN}/api/v2/users`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${managementToken}`,
+      },
+      body: JSON.stringify({
+        email: login,
+        password: password,
+        connection: 'Username-Password-Authentication',
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        message: data.message || 'Registration failed',
+      });
+    }
+
+    return res.status(201).json({
+      user_id: data.user_id,
+      email: data.email,
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    return res.status(500).json({ message: 'Internal server error' });
   }
 });
 
