@@ -120,18 +120,29 @@
         const session = sessionStorage.getItem('session');
 
         let token;
+        let refreshToken;
 
         try {
-            token = JSON.parse(session).token;
+            const parsedSession = JSON.parse(session);
+            token = parsedSession.token;
+            refreshToken = parsedSession.refreshToken;
         } catch(e) {}
 
         if (token) {
             axios.get('/', {
                 headers: {
-                    Authorization: token
+                    Authorization: token,
+                    'x-refresh-token': refreshToken || ''
                 }
             }).then((response) => {
-                const { username } = response.data;
+                const { username, token: newToken } = response.data;
+
+                if (newToken) {
+                    sessionStorage.setItem('session', JSON.stringify({
+                        token: newToken,
+                        refreshToken
+                    }));
+                }
 
                 if (username) {
                     const mainHolder = document.getElementById("main-holder");

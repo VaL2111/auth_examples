@@ -7,24 +7,66 @@ process.loadEnvFile(path.join(__dirname, '../.env'));
 
 const port = 3003;
 const SESSION_KEY = 'Authorization';
+const REFRESH_HEADER_KEY = 'x-refresh-token';
+const REFRESH_THRESHOLD_SECONDS = 40000;
 const { AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET } = process.env;
 
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-app.use((req, res, next) => {
-  const token = req.get(SESSION_KEY);
+async function refreshAuth0Token(refreshToken) {
+  const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: AUTH0_CLIENT_ID,
+      client_secret: AUTH0_CLIENT_SECRET,
+      refresh_token: refreshToken,
+    }),
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return response.json();
+}
+
+app.use(async (req, res, next) => {
+  let token = req.get(SESSION_KEY);
+  const refreshToken = req.get(REFRESH_HEADER_KEY);
   req.session = {};
 
   if (token) {
-    const decoded = jwt.decode(token);
+    let decoded = jwt.decode(token);
 
-    if (decoded && decoded.exp * 1000 > Date.now()) {
-      req.session = {
-        username: decoded.email || decoded.nickname || decoded.sub,
-        user: decoded,
-      };
+    if (decoded) {
+      const nowInSeconds = Math.floor(Date.now() / 1000);
+      const timeLeft = decoded.exp - nowInSeconds;
+
+      if (timeLeft < REFRESH_THRESHOLD_SECONDS && refreshToken) {
+        try {
+          const refreshedData = await refreshAuth0Token(refreshToken);
+
+          if (refreshedData && refreshedData.id_token) {
+            token = refreshedData.id_token;
+            decoded = jwt.decode(token);
+            req.newToken = token;
+            console.log('Token refreshed successfully via refresh_token grant');
+          }
+        } catch (error) {
+          console.error('Failed to refresh token:', error);
+        }
+      }
+
+      if (decoded && decoded.exp > nowInSeconds) {
+        req.session = {
+          username: decoded.email || decoded.nickname || decoded.sub,
+          user: decoded,
+        };
+      }
     }
   }
 
@@ -36,6 +78,7 @@ app.get('/', (req, res) => {
     return res.json({
       username: req.session.username,
       logout: `http://localhost:${port}/logout`,
+      token: req.newToken,
     });
   }
   res.sendFile(path.join(__dirname + '/index.html'));
