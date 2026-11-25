@@ -8,12 +8,40 @@ process.loadEnvFile(path.join(__dirname, '../.env'));
 const port = 3003;
 const SESSION_KEY = 'Authorization';
 const REFRESH_HEADER_KEY = 'x-refresh-token';
-const REFRESH_THRESHOLD_SECONDS = 40000;
+const REFRESH_THRESHOLD_SECONDS = 300;
 const { AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET } = process.env;
+
+let cachedPublicKey = null;
 
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+async function getAuth0PublicKey() {
+  if (cachedPublicKey) {
+    return cachedPublicKey;
+  }
+
+  const response = await fetch(`https://${AUTH0_DOMAIN}/pem`);
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch Auth0 PEM certificate: ${response.status}`,
+    );
+  }
+
+  cachedPublicKey = await response.text();
+  return cachedPublicKey;
+}
+
+function verifyAuth0Token(token, publicKey, ignoreExpiration) {
+  return jwt.verify(token, publicKey, {
+    algorithms: ['RS256'],
+    issuer: `https://${AUTH0_DOMAIN}/`,
+    audience: AUTH0_CLIENT_ID,
+    ignoreExpiration,
+  });
+}
 
 async function refreshAuth0Token(refreshToken) {
   const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
@@ -60,9 +88,10 @@ app.use(async (req, res, next) => {
   req.session = {};
 
   if (token) {
-    let decoded = jwt.decode(token);
+    try {
+      const publicKey = await getAuth0PublicKey();
+      let decoded = verifyAuth0Token(token, publicKey, true);
 
-    if (decoded) {
       const nowInSeconds = Math.floor(Date.now() / 1000);
       const timeLeft = decoded.exp - nowInSeconds;
 
@@ -72,21 +101,23 @@ app.use(async (req, res, next) => {
 
           if (refreshedData && refreshedData.id_token) {
             token = refreshedData.id_token;
-            decoded = jwt.decode(token);
+            decoded = verifyAuth0Token(token, publicKey, false);
             req.newToken = token;
             console.log('Token refreshed successfully via refresh_token grant');
           }
-        } catch (error) {
-          console.error('Failed to refresh token:', error);
+        } catch (refreshError) {
+          console.error('Failed to refresh token:', refreshError);
         }
       }
 
-      if (decoded && decoded.exp > nowInSeconds) {
+      if (decoded.exp > nowInSeconds) {
         req.session = {
           username: decoded.email || decoded.nickname || decoded.sub,
           user: decoded,
         };
       }
+    } catch (error) {
+      console.warn('JWT validation failed:', error.message);
     }
   }
 
