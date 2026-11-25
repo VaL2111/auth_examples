@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
@@ -9,13 +10,75 @@ const port = 3003;
 const SESSION_KEY = 'Authorization';
 const REFRESH_HEADER_KEY = 'x-refresh-token';
 const REFRESH_THRESHOLD_SECONDS = 300;
-const { AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET } = process.env;
+const {
+  AUTH0_DOMAIN,
+  AUTH0_CLIENT_ID,
+  AUTH0_CLIENT_SECRET,
+  JWT_ENCRYPTION_KEY,
+} = process.env;
+
+const ENCRYPTION_KEY = Buffer.from(JWT_ENCRYPTION_KEY || '', 'hex');
+
+if (ENCRYPTION_KEY.length !== 32) {
+  throw new Error(
+    'JWT_ENCRYPTION_KEY must be a 64-character hex string (32 bytes)',
+  );
+}
 
 let cachedPublicKey = null;
 
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+function encryptJwsToJwe(jwsToken) {
+  const headerB64 = Buffer.from(
+    JSON.stringify({ alg: 'dir', enc: 'A256GCM', cty: 'JWT' }),
+  ).toString('base64url');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+  cipher.setAAD(Buffer.from(headerB64, 'ascii'));
+
+  const ciphertext = Buffer.concat([
+    cipher.update(jwsToken, 'utf8'),
+    cipher.final(),
+  ]);
+  const authTag = cipher.getAuthTag();
+
+  return `${headerB64}..${iv.toString('base64url')}.${ciphertext.toString('base64url')}.${authTag.toString('base64url')}`;
+}
+
+function decryptJweToJws(jweToken) {
+  const parts = jweToken.split('.');
+
+  if (parts.length !== 5 || parts[1] !== '') {
+    throw new Error('Invalid JWE compact serialization format');
+  }
+
+  const [headerB64, , ivB64, ciphertextB64, authTagB64] = parts;
+  const header = JSON.parse(
+    Buffer.from(headerB64, 'base64url').toString('utf8'),
+  );
+
+  if (header.alg !== 'dir' || header.enc !== 'A256GCM') {
+    throw new Error('Unsupported JWE algorithm');
+  }
+
+  const decipher = crypto.createDecipheriv(
+    'aes-256-gcm',
+    ENCRYPTION_KEY,
+    Buffer.from(ivB64, 'base64url'),
+  );
+  decipher.setAAD(Buffer.from(headerB64, 'ascii'));
+  decipher.setAuthTag(Buffer.from(authTagB64, 'base64url'));
+
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(ciphertextB64, 'base64url')),
+    decipher.final(),
+  ]);
+
+  return decrypted.toString('utf8');
+}
 
 async function getAuth0PublicKey() {
   if (cachedPublicKey) {
@@ -83,14 +146,15 @@ async function getManagementApiToken() {
 }
 
 app.use(async (req, res, next) => {
-  let token = req.get(SESSION_KEY);
+  const encryptedToken = req.get(SESSION_KEY);
   const refreshToken = req.get(REFRESH_HEADER_KEY);
   req.session = {};
 
-  if (token) {
+  if (encryptedToken) {
     try {
+      let jwsToken = decryptJweToJws(encryptedToken);
       const publicKey = await getAuth0PublicKey();
-      let decoded = verifyAuth0Token(token, publicKey, true);
+      let decoded = verifyAuth0Token(jwsToken, publicKey, true);
 
       const nowInSeconds = Math.floor(Date.now() / 1000);
       const timeLeft = decoded.exp - nowInSeconds;
@@ -100,9 +164,9 @@ app.use(async (req, res, next) => {
           const refreshedData = await refreshAuth0Token(refreshToken);
 
           if (refreshedData && refreshedData.id_token) {
-            token = refreshedData.id_token;
-            decoded = verifyAuth0Token(token, publicKey, false);
-            req.newToken = token;
+            jwsToken = refreshedData.id_token;
+            decoded = verifyAuth0Token(jwsToken, publicKey, false);
+            req.newToken = encryptJwsToJwe(jwsToken);
             console.log('Token refreshed successfully via refresh_token grant');
           }
         } catch (refreshError) {
@@ -164,7 +228,7 @@ app.post('/api/login', async (req, res) => {
     const data = await response.json();
 
     return res.json({
-      token: data.id_token,
+      token: encryptJwsToJwe(data.id_token),
       refreshToken: data.refresh_token,
     });
   } catch (error) {
