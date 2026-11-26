@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 process.loadEnvFile(path.join(__dirname, '../.env'));
 
 const port = 3003;
+const REDIRECT_URI = `http://localhost:${port}`;
 const SESSION_KEY = 'Authorization';
 const REFRESH_HEADER_KEY = 'x-refresh-token';
 const REFRESH_THRESHOLD_SECONDS = 300;
@@ -125,26 +126,6 @@ async function refreshAuth0Token(refreshToken) {
   return response.json();
 }
 
-async function getManagementApiToken() {
-  const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: AUTH0_CLIENT_ID,
-      client_secret: AUTH0_CLIENT_SECRET,
-      audience: `https://${AUTH0_DOMAIN}/api/v2/`,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error('Failed to obtain Management API token');
-  }
-
-  const data = await response.json();
-  return data.access_token;
-}
-
 app.use(async (req, res, next) => {
   const encryptedToken = req.get(SESSION_KEY);
   const refreshToken = req.get(REFRESH_HEADER_KEY);
@@ -199,79 +180,27 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname + '/index.html'));
 });
 
+app.get('/login', (req, res) => {
+  const authorizeParams = new URLSearchParams({
+    client_id: AUTH0_CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    response_type: 'code',
+    response_mode: 'query',
+    scope: 'openid profile email offline_access',
+  });
+
+  res.redirect(
+    `https://${AUTH0_DOMAIN}/authorize?${authorizeParams.toString()}`,
+  );
+});
+
 app.get('/logout', (req, res) => {
-  res.redirect('/');
-});
+  const logoutParams = new URLSearchParams({
+    client_id: AUTH0_CLIENT_ID,
+    returnTo: REDIRECT_URI,
+  });
 
-app.post('/api/login', async (req, res) => {
-  const { login, password } = req.body;
-
-  try {
-    const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'http://auth0.com/oauth/grant-type/password-realm',
-        realm: 'Username-Password-Authentication',
-        username: login,
-        password: password,
-        client_id: AUTH0_CLIENT_ID,
-        client_secret: AUTH0_CLIENT_SECRET,
-        scope: 'openid profile email offline_access',
-      }),
-    });
-
-    if (!response.ok) {
-      return res.status(401).send();
-    }
-
-    const data = await response.json();
-
-    return res.json({
-      token: encryptJwsToJwe(data.id_token),
-      refreshToken: data.refresh_token,
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    return res.status(500).send();
-  }
-});
-
-app.post('/api/register', async (req, res) => {
-  const { login, password } = req.body;
-
-  try {
-    const managementToken = await getManagementApiToken();
-
-    const response = await fetch(`https://${AUTH0_DOMAIN}/api/v2/users`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${managementToken}`,
-      },
-      body: JSON.stringify({
-        email: login,
-        password: password,
-        connection: 'Username-Password-Authentication',
-      }),
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        message: data.message || 'Registration failed',
-      });
-    }
-
-    return res.status(201).json({
-      user_id: data.user_id,
-      email: data.email,
-    });
-  } catch (error) {
-    console.error('Registration error:', error);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
+  res.redirect(`https://${AUTH0_DOMAIN}/v2/logout?${logoutParams.toString()}`);
 });
 
 app.listen(port, () => {
