@@ -126,6 +126,27 @@ async function refreshAuth0Token(refreshToken) {
   return response.json();
 }
 
+async function exchangeCodeForTokens(code) {
+  const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: AUTH0_CLIENT_ID,
+      client_secret: AUTH0_CLIENT_SECRET,
+      code,
+      redirect_uri: REDIRECT_URI,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Token exchange failed (${response.status}): ${errorBody}`);
+  }
+
+  return response.json();
+}
+
 app.use(async (req, res, next) => {
   const encryptedToken = req.get(SESSION_KEY);
   const refreshToken = req.get(REFRESH_HEADER_KEY);
@@ -201,6 +222,28 @@ app.get('/logout', (req, res) => {
   });
 
   res.redirect(`https://${AUTH0_DOMAIN}/v2/logout?${logoutParams.toString()}`);
+});
+
+app.post('/api/callback', async (req, res) => {
+  const { code } = req.body;
+
+  if (!code) {
+    return res.status(400).json({ message: 'Authorization code is required' });
+  }
+
+  try {
+    const tokenData = await exchangeCodeForTokens(code);
+    const publicKey = await getAuth0PublicKey();
+    verifyAuth0Token(tokenData.id_token, publicKey, false);
+
+    return res.json({
+      token: encryptJwsToJwe(tokenData.id_token),
+      refreshToken: tokenData.refresh_token,
+    });
+  } catch (error) {
+    console.error('Code exchange error:', error.message);
+    return res.status(401).json({ message: 'Failed to exchange code' });
+  }
 });
 
 app.listen(port, () => {

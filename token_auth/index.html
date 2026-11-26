@@ -120,8 +120,19 @@
       loginHeader.textContent = 'Authentication Error';
       statusMsg.textContent = errorDescription;
     } else if (code) {
-      loginHeader.textContent = 'SSO Redirect Successful';
-      statusMsg.textContent = `Authorization code received: ${code}`;
+      statusMsg.textContent = 'Exchanging authorization code for tokens...';
+      window.history.replaceState({}, document.title, '/');
+
+      axios
+        .post('/api/callback', { code })
+        .then((response) => {
+          sessionStorage.setItem('session', JSON.stringify(response.data));
+          window.location.reload();
+        })
+        .catch(() => {
+          loginHeader.textContent = 'Authentication Error';
+          statusMsg.textContent = 'Failed to exchange authorization code.';
+        });
     } else {
       window.location.replace('/login');
     }
